@@ -13,7 +13,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   alias CooCoo.Coordinates.MapProjectionCoordinates
   alias CooCoo.Projections.TMHelpers
 
-  import CooCoo.MathHelpers, only: [equal?: 3, zero?: 2]
+  import CooCoo.MathHelpers, only: [equal?: 3, zero?: 2, finite_float?: 1]
 
   @n_terms 6
   @max_delta_long Constants.pi_over_180() * 70.0
@@ -69,60 +69,75 @@ defmodule CooCoo.Projections.TransverseMercator do
   def geodetic_latitude_from_conformal(sin_chi, eccentricity) do
     s_initial = sin_chi
 
-    final_s =
-      do_geodetic_lat_iteration(sin_chi, eccentricity, s_initial, s_initial + 1.0e99, 30)
+    case do_geodetic_lat_iteration(sin_chi, eccentricity, s_initial, s_initial + 1.0e99, 30) do
+      {:ok, final_s} ->
+        clamped_final_s = max(-1.0, min(1.0, final_s))
+        {:ok, :math.asin(clamped_final_s)}
 
-    clamped_final_s = max(-1.0, min(1.0, final_s))
-    :math.asin(clamped_final_s)
+      {:error, reason} ->
+        {:error, {:geodetic_lat_iteration_failed, reason}}
+    end
   end
 
-  defp do_geodetic_lat_iteration(_sin_chi, _eccentricity, current_s, _s_old, 0) do
-    current_s
+  def do_geodetic_lat_iteration(_sin_chi, _eccentricity, _current_s, _s_old, 0) do
+    {:error, :max_iterations_reached_in_geodetic_lat}
   end
 
-  defp do_geodetic_lat_iteration(sin_chi, eccentricity, current_s, s_old, iterations_left) do
-    if abs(current_s - s_old) < 1.0e-12 do
-      current_s
+  def do_geodetic_lat_iteration(sin_chi, eccentricity, current_s, s_old, iterations_left) do
+    # Use a specific, small epsilon for convergence check of the iteration itself
+    iteration_epsilon = 1.0e-12
+    # Using helper
+    if equal?(current_s, s_old, iteration_epsilon) do
+      {:ok, current_s}
     else
       val_for_atanh = eccentricity * current_s
 
       p_arg =
         cond do
-          val_for_atanh >= 1.0 -> 1.0 - 1.0e-15
-          val_for_atanh <= -1.0 -> -1.0 + 1.0e-15
+          val_for_atanh >= 1.0 -> 1.0 - @boundary_epsilon
+          val_for_atanh <= -1.0 -> -1.0 + @boundary_epsilon
           true -> val_for_atanh
         end
 
-      p_exp_arg = eccentricity * atanh(p_arg)
+      with {:ok, atanh_val_p_arg} <- atanh(p_arg),
+           true <-
+             is_number(atanh_val_p_arg) or
+               {:error, {:atanh_returned_non_numeric_for_p_exp_iteration, atanh_val_p_arg}},
+           {:ok, p_exp_arg} <- {:ok, eccentricity * atanh_val_p_arg},
+           {:ok, p_val} <-
+             {:ok,
+              cond do
+                p_exp_arg > 709.0 -> 1.0e300
+                p_exp_arg < -709.0 -> 1.0e-300
+                true -> :math.exp(p_exp_arg)
+              end} do
+        # p_val is now a number
+        p_sq = p_val * p_val
+        one_plus_sin_chi = 1.0 + sin_chi
+        one_minus_sin_chi = 1.0 - sin_chi
+        denominator = one_plus_sin_chi * p_sq + one_minus_sin_chi
 
-      p =
-        cond do
-          # Approx limit for :math.exp
-          p_exp_arg > 709.0 -> 1.0e300
-          p_exp_arg < -709.0 -> 1.0e-300
-          true -> :math.exp(p_exp_arg)
-        end
-
-      p_sq = p * p
-      one_plus_sin_chi = 1.0 + sin_chi
-      one_minus_sin_chi = 1.0 - sin_chi
-
-      denominator = one_plus_sin_chi * p_sq + one_minus_sin_chi
-
-      next_s =
-        if denominator == 0.0 do
-          current_s
+        # Using helper
+        if zero?(denominator, @boundary_epsilon) do
+          {:error, :zero_denominator_in_geodetic_lat_iteration}
         else
-          (one_plus_sin_chi * p_sq - one_minus_sin_chi) / denominator
-        end
+          next_s_val_calc = (one_plus_sin_chi * p_sq - one_minus_sin_chi) / denominator
 
-      do_geodetic_lat_iteration(
-        sin_chi,
-        eccentricity,
-        next_s,
-        current_s,
-        iterations_left - 1
-      )
+          if finite_float?(next_s_val_calc) do
+            do_geodetic_lat_iteration(
+              sin_chi,
+              eccentricity,
+              next_s_val_calc,
+              current_s,
+              iterations_left - 1
+            )
+          else
+            {:error, {:invalid_next_s_in_iteration, next_s_val_calc}}
+          end
+        end
+      else
+        {:error, reason} -> {:error, {:iteration_step_failed_in_with, reason}}
+      end
     end
   end
 
@@ -162,9 +177,23 @@ defmodule CooCoo.Projections.TransverseMercator do
     {List.to_tuple(Enum.reverse(c_list_rev)), List.to_tuple(Enum.reverse(s_list_rev))}
   end
 
+  defp get_tm_coefficients(a, f) do
+    if a == Constants.wgs84_a() and f == Constants.wgs84_f() do
+      {:ok, {@wgs84_a_coeffs, @wgs84_b_coeffs, @wgs84_r4oa}}
+    else
+      # TMHelpers.generate_coefficients returns a raw tuple, wrap it in {:ok, ...}
+      {:ok, TMHelpers.generate_coefficients(f)}
+    end
+  end
+
+  defp nudge_value_if_at_boundary(value) do
+    if abs(value) >= 1.0, do: value / (1.0 + 1.0e-15), else: value
+  end
+
   @doc """
   Converts Geodetic coordinates (latitude, longitude) to Transverse Mercator
   easting and northing.
+  Returns `{:ok, %MapProjectionCoordinates{}}` or `{:error, reason}`.
   """
   def convert_from_geodetic(
         %GeodeticCoordinates{} = geodetic_coords,
@@ -180,80 +209,89 @@ defmodule CooCoo.Projections.TransverseMercator do
     false_northing = Keyword.fetch!(projection_params, :false_northing)
     k0 = Keyword.fetch!(projection_params, :scale_factor)
 
-    {a_coeffs_tuple, _b_coeffs_tuple, r4oa_val} =
-      if a == Constants.wgs84_a() and f == Constants.wgs84_f() do
-        {@wgs84_a_coeffs, @wgs84_b_coeffs, @wgs84_r4oa}
-      else
-        TMHelpers.generate_coefficients(f)
-      end
+    # get_tm_coefficients is a simple lookup or calculation, assumed to succeed or raise directly
+    # if TMHelpers.generate_coefficients had an issue not caught by its own logic.
+    # If get_tm_coefficients itself needed to return {:error, _}, it would be the first step in `with`.
+    {:ok, {a_coeffs_tuple, _b_coeffs_tuple_ignored, r4oa_val}} = get_tm_coefficients(a, f)
 
-    k0r4 = r4oa_val * k0 * a
+    with {:ok, k0r4} <- {:ok, r4oa_val * k0 * a},
+         {:ok, lambda} <-
+           {:ok,
+            (
+              lambda_raw = geodetic_coords.longitude - origin_lon
 
-    lambda = geodetic_coords.longitude - origin_lon
+              cond do
+                lambda_raw > Constants.pi() -> lambda_raw - Constants.two_pi()
+                lambda_raw < -Constants.pi() -> lambda_raw + Constants.two_pi()
+                true -> lambda_raw
+              end
+            )},
+         {:ok, sin_phi} <- {:ok, :math.sin(geodetic_coords.latitude)},
+         {:ok, cos_phi} <- {:ok, :math.cos(geodetic_coords.latitude)},
+         {:ok, val_for_atanh1} <- {:ok, es * sin_phi},
+         {:ok, p_arg1} <- {:ok, nudge_value_if_at_boundary(val_for_atanh1)},
+         {:ok, atanh_val1} <- atanh(p_arg1),
+         true <-
+           is_number(atanh_val1) or {:error, {:atanh_returned_non_numeric_for_p_exp, atanh_val1}},
+         {:ok, p_exp_arg_fwd} <- {:ok, es * atanh_val1},
+         {:ok, p_val} <-
+           {:ok,
+            cond do
+              p_exp_arg_fwd > 709.0 -> 1.0e300
+              p_exp_arg_fwd < -709.0 -> 1.0e-300
+              true -> :math.exp(p_exp_arg_fwd)
+            end},
+         true <- not zero?(p_val, @boundary_epsilon) or {:error, :p_val_is_zero_from_exp},
+         {:ok, part1} <- {:ok, (1.0 + sin_phi) / p_val},
+         {:ok, part2} <- {:ok, (1.0 - sin_phi) * p_val},
+         {:ok, denom_chi} <- {:ok, part1 + part2},
+         true <- not zero?(denom_chi, @boundary_epsilon) or {:error, :denom_chi_is_zero},
+         {:ok, cos_chi} <- {:ok, 2.0 * cos_phi / denom_chi},
+         {:ok, sin_chi} <- {:ok, (part1 - part2) / denom_chi},
+         {:ok, val_for_atanh2} <- {:ok, cos_chi * :math.sin(lambda)},
+         {:ok, p_arg2} <- {:ok, nudge_value_if_at_boundary(val_for_atanh2)},
+         {:ok, u_prime} <- atanh(p_arg2),
+         true <-
+           is_number(u_prime) or {:error, {:atanh_returned_non_numeric_for_u_prime, u_prime}} do
+      warning_message =
+        if abs(lambda) > @max_delta_long,
+          do: "Longitude is far from Central Meridian, distortion may be significant",
+          else: ""
 
-    lambda =
-      cond do
-        lambda > Constants.pi() -> lambda - Constants.two_pi()
-        lambda < -Constants.pi() -> lambda + Constants.two_pi()
-        true -> lambda
-      end
+      v_prime = :math.atan2(sin_chi, cos_chi * :math.cos(lambda))
 
-    # Warning for large lambda can be added here or in UTM module
-    warning_message =
-      if abs(lambda) > @max_delta_long,
-        do: "Longitude is far from Central Meridian, distortion may be significant",
-        else: ""
+      {c2ku_list_tup, s2ku_list_tup} = compute_hyperbolic_series(2.0 * u_prime, @n_terms)
+      {c2kv_list_tup, s2kv_list_tup} = compute_trig_series(2.0 * v_prime, @n_terms)
 
-    sin_phi = :math.sin(geodetic_coords.latitude)
-    cos_phi = :math.cos(geodetic_coords.latitude)
+      x_star =
+        Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
+          acc + elem(a_coeffs_tuple, k) * elem(s2ku_list_tup, k) * elem(c2kv_list_tup, k)
+        end) + u_prime
 
-    val_for_atanh = es * sin_phi
-    p_arg = if abs(val_for_atanh) >= 1.0, do: val_for_atanh / (1.0 + 1.0e-15), else: val_for_atanh
+      y_star =
+        Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
+          acc + elem(a_coeffs_tuple, k) * elem(c2ku_list_tup, k) * elem(s2kv_list_tup, k)
+        end) + v_prime
 
-    p_exp_arg_fwd = es * atanh(p_arg)
+      easting = k0r4 * x_star + false_easting
+      northing = k0r4 * y_star + false_northing
 
-    p_val =
-      cond do
-        p_exp_arg_fwd > 709.0 -> 1.0e300
-        p_exp_arg_fwd < -709.0 -> 1.0e-300
-        true -> :math.exp(p_exp_arg_fwd)
-      end
-
-    part1 = (1.0 + sin_phi) / p_val
-    part2 = (1.0 - sin_phi) * p_val
-    denom_chi = part1 + part2
-    cos_chi = if denom_chi == 0.0, do: 0.0, else: 2.0 * cos_phi / denom_chi
-    sin_chi = if denom_chi == 0.0, do: 0.0, else: (part1 - part2) / denom_chi
-
-    u_prime = atanh(cos_chi * :math.sin(lambda))
-    v_prime = :math.atan2(sin_chi, cos_chi * :math.cos(lambda))
-
-    {c2ku_list_tup, s2ku_list_tup} = compute_hyperbolic_series(2.0 * u_prime, @n_terms)
-    {c2kv_list_tup, s2kv_list_tup} = compute_trig_series(2.0 * v_prime, @n_terms)
-
-    x_star =
-      Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
-        acc + elem(a_coeffs_tuple, k) * elem(s2ku_list_tup, k) * elem(c2kv_list_tup, k)
-      end) + u_prime
-
-    y_star =
-      Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
-        acc + elem(a_coeffs_tuple, k) * elem(c2ku_list_tup, k) * elem(s2kv_list_tup, k)
-      end) + v_prime
-
-    easting = k0r4 * x_star + false_easting
-    northing = k0r4 * y_star + false_northing
-
-    %MapProjectionCoordinates{
-      easting: easting,
-      northing: northing,
-      warning_message: warning_message
-    }
+      {:ok,
+       %MapProjectionCoordinates{
+         easting: easting,
+         northing: northing,
+         warning_message: warning_message
+       }}
+    else
+      # This block handles errors from the `with` clause
+      {:error, error_details} -> {:error, {:convert_from_geodetic_failed, error_details}}
+    end
   end
 
   @doc """
   Converts Transverse Mercator easting and northing to Geodetic coordinates
   (latitude, longitude).
+  Returns `{:ok, %GeodeticCoordinates{}}` or `{:error, reason}`.
   """
   def convert_to_geodetic(
         %MapProjectionCoordinates{} = proj_coords,
@@ -269,57 +307,70 @@ defmodule CooCoo.Projections.TransverseMercator do
     false_northing = Keyword.fetch!(projection_params, :false_northing)
     k0 = Keyword.fetch!(projection_params, :scale_factor)
 
-    {_a_coeffs_tuple, b_coeffs_tuple, r4oa_val} =
-      if a == Constants.wgs84_a() and f == Constants.wgs84_f() do
-        {@wgs84_a_coeffs, @wgs84_b_coeffs, @wgs84_r4oa}
-      else
-        TMHelpers.generate_coefficients(f)
-      end
+    # get_tm_coefficients returns {:ok, tuple} or raises on its own internal error if TMHelpers fails
+    # So, pattern match directly or handle its error if it were to return {:error, _}
+    case get_tm_coefficients(a, f) do
+      {:ok, {_a_coeffs_tuple_ignored, b_coeffs_tuple, r4oa_val}} ->
+        with {:ok, k0r4_product} <- {:ok, r4oa_val * k0 * a},
+             true <-
+               not zero?(k0r4_product, @boundary_epsilon) or {:error, :k0r4_product_is_zero},
+             {:ok, k0r4_inv} <- {:ok, 1.0 / k0r4_product},
+             {:ok, x_star} <- {:ok, (proj_coords.easting - false_easting) * k0r4_inv},
+             {:ok, y_star} <- {:ok, (proj_coords.northing - false_northing) * k0r4_inv},
+             {:ok, {c2kx_list_tup, s2kx_list_tup}} <-
+               {:ok, compute_hyperbolic_series(2.0 * x_star, @n_terms)},
+             {:ok, {c2ky_list_tup, s2ky_list_tup}} <-
+               {:ok, compute_trig_series(2.0 * y_star, @n_terms)},
+             {:ok, u_prime} <-
+               {:ok,
+                Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
+                  acc + elem(b_coeffs_tuple, k) * elem(s2kx_list_tup, k) * elem(c2ky_list_tup, k)
+                end) + x_star},
+             {:ok, v_prime} <-
+               {:ok,
+                Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
+                  acc + elem(b_coeffs_tuple, k) * elem(c2kx_list_tup, k) * elem(s2ky_list_tup, k)
+                end) + y_star},
+             {:ok, lambda_from_cm} <- {:ok, :math.atan2(:math.sinh(u_prime), :math.cos(v_prime))},
+             {:ok, cosh_u_prime} <- {:ok, :math.cosh(u_prime)},
+             true <-
+               not zero?(cosh_u_prime, @boundary_epsilon) or
+                 {:error, :cosh_u_prime_is_zero_for_sin_chi},
+             {:ok, sin_chi_raw} <- {:ok, :math.sin(v_prime) / cosh_u_prime},
+             {:ok, clamped_sin_chi} <- {:ok, max(-1.0, min(1.0, sin_chi_raw))},
+             # geodetic_latitude_from_conformal itself returns {:ok, lat} or {:error, reason}
+             {:ok, latitude} <- geodetic_latitude_from_conformal(clamped_sin_chi, es) do
+          longitude_raw = origin_lon + lambda_from_cm
 
-    k0r4_inv = if r4oa_val * k0 * a == 0.0, do: 0.0, else: 1.0 / (r4oa_val * k0 * a)
+          longitude =
+            cond do
+              longitude_raw > Constants.pi() -> longitude_raw - Constants.two_pi()
+              longitude_raw < -Constants.pi() -> longitude_raw + Constants.two_pi()
+              true -> longitude_raw
+            end
 
-    x_star = (proj_coords.easting - false_easting) * k0r4_inv
-    y_star = (proj_coords.northing - false_northing) * k0r4_inv
+          warning_message =
+            if abs(lambda_from_cm) > @max_delta_long,
+              do: "Longitude is far from Central Meridian, distortion may be significant",
+              else: ""
 
-    {c2kx_list_tup, s2kx_list_tup} = compute_hyperbolic_series(2.0 * x_star, @n_terms)
-    {c2ky_list_tup, s2ky_list_tup} = compute_trig_series(2.0 * y_star, @n_terms)
+          {:ok,
+           %GeodeticCoordinates{
+             longitude: longitude,
+             latitude: latitude,
+             height: 0.0,
+             warning_message: warning_message
+           }}
+        else
+          {:error, error_details} ->
+            {:error, {:convert_to_geodetic_failed_inner_with, error_details}}
+        end
 
-    u_prime =
-      Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
-        acc + elem(b_coeffs_tuple, k) * elem(s2kx_list_tup, k) * elem(c2ky_list_tup, k)
-      end) + x_star
-
-    v_prime =
-      Enum.reduce(0..(@n_terms - 1), 0.0, fn k, acc ->
-        acc + elem(b_coeffs_tuple, k) * elem(c2kx_list_tup, k) * elem(s2ky_list_tup, k)
-      end) + y_star
-
-    lambda = :math.atan2(:math.sinh(u_prime), :math.cos(v_prime))
-
-    cosh_u_prime = :math.cosh(u_prime)
-    sin_chi = if cosh_u_prime == 0.0, do: 0.0, else: :math.sin(v_prime) / cosh_u_prime
-    sin_chi = max(-1.0, min(1.0, sin_chi))
-
-    latitude = geodetic_latitude_from_conformal(sin_chi, es)
-    longitude = origin_lon + lambda
-
-    longitude =
-      cond do
-        longitude > Constants.pi() -> longitude - Constants.two_pi()
-        longitude < -Constants.pi() -> longitude + Constants.two_pi()
-        true -> longitude
-      end
-
-    warning_message =
-      if abs(lambda) > @max_delta_long,
-        do: "Longitude is far from Central Meridian, distortion may be significant",
-        else: ""
-
-    %GeodeticCoordinates{
-      longitude: longitude,
-      latitude: latitude,
-      height: 0.0,
-      warning_message: warning_message
-    }
+        # This case should not be hit if get_tm_coefficients always returns {:ok, _}
+        # or TMHelpers.generate_coefficients raises on error.
+        # If TMHelpers itself could return {:error, _} and get_tm_coefficients propagated it,
+        # then this case would be valid.
+        # {:error, reason_coeffs} -> {:error, {:get_tm_coefficients_failed, reason_coeffs}}
+    end
   end
 end
