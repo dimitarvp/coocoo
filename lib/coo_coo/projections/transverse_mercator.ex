@@ -15,9 +15,12 @@ defmodule CooCoo.Projections.TransverseMercator do
 
   import CooCoo.MathHelpers, only: [equal?: 3, zero?: 2, finite_float?: 1]
 
+  # Value taken from TMHelpers for consistency in this module
   @n_terms 6
   @max_delta_long Constants.pi_over_180() * 70.0
 
+  # Coefficients are pre-calculated for WGS84 for potential optimization if needed,
+  # but the conversion functions will use get_tm_coefficients for flexibility.
   @wgs84_coefficients_tuple TMHelpers.generate_coefficients(Constants.wgs84_f())
   @wgs84_a_coeffs elem(@wgs84_coefficients_tuple, 0)
   @wgs84_b_coeffs elem(@wgs84_coefficients_tuple, 1)
@@ -211,12 +214,8 @@ defmodule CooCoo.Projections.TransverseMercator do
     false_northing = Keyword.fetch!(projection_params, :false_northing)
     k0 = Keyword.fetch!(projection_params, :scale_factor)
 
-    # get_tm_coefficients is a simple lookup or calculation, assumed to succeed or raise directly
-    # if TMHelpers.generate_coefficients had an issue not caught by its own logic.
-    # If get_tm_coefficients itself needed to return {:error, _}, it would be the first step in `with`.
-    {:ok, {a_coeffs_tuple, _b_coeffs_tuple_ignored, r4oa_val}} = get_tm_coefficients(a, f)
-
-    with {:ok, k0r4} <- {:ok, r4oa_val * k0 * a},
+    with {:ok, {a_coeffs_tuple, _b_coeffs_tuple_ignored, r4oa_val}} <- get_tm_coefficients(a, f),
+         {:ok, k0r4} <- {:ok, r4oa_val * k0 * a},
          {:ok, lambda} <-
            {:ok,
             (
@@ -286,6 +285,7 @@ defmodule CooCoo.Projections.TransverseMercator do
        }}
     else
       # This block handles errors from the `with` clause
+      # The first clause that fails will result in its error tuple being passed here
       {:error, error_details} -> {:error, {:convert_from_geodetic_failed, error_details}}
     end
   end
@@ -309,8 +309,6 @@ defmodule CooCoo.Projections.TransverseMercator do
     false_northing = Keyword.fetch!(projection_params, :false_northing)
     k0 = Keyword.fetch!(projection_params, :scale_factor)
 
-    # get_tm_coefficients returns {:ok, tuple} or raises on its own internal error if TMHelpers fails
-    # So, pattern match directly or handle its error if it were to return {:error, _}
     case get_tm_coefficients(a, f) do
       {:ok, {_a_coeffs_tuple_ignored, b_coeffs_tuple, r4oa_val}} ->
         with {:ok, k0r4_product} <- {:ok, r4oa_val * k0 * a},
@@ -340,7 +338,6 @@ defmodule CooCoo.Projections.TransverseMercator do
                  {:error, :cosh_u_prime_is_zero_for_sin_chi},
              {:ok, sin_chi_raw} <- {:ok, :math.sin(v_prime) / cosh_u_prime},
              {:ok, clamped_sin_chi} <- {:ok, max(-1.0, min(1.0, sin_chi_raw))},
-             # geodetic_latitude_from_conformal itself returns {:ok, lat} or {:error, reason}
              {:ok, latitude} <- geodetic_latitude_from_conformal(clamped_sin_chi, es) do
           longitude_raw = origin_lon + lambda_from_cm
 
@@ -364,15 +361,18 @@ defmodule CooCoo.Projections.TransverseMercator do
              warning_message: warning_message
            }}
         else
-          {:error, error_details} ->
-            {:error, {:convert_to_geodetic_failed_inner_with, error_details}}
+          # This block handles errors from the inner `with` clause
+          {:error, error_details_inner} ->
+            {:error, {:convert_to_geodetic_failed_inner_with, error_details_inner}}
         end
 
-        # This case should not be hit if get_tm_coefficients always returns {:ok, _}
-        # or TMHelpers.generate_coefficients raises on error.
-        # If TMHelpers itself could return {:error, _} and get_tm_coefficients propagated it,
-        # then this case would be valid.
-        # {:error, reason_coeffs} -> {:error, {:get_tm_coefficients_failed, reason_coeffs}}
+        # This else matches the `case get_tm_coefficients(a,f)` if it could return an error
+        # Since get_tm_coefficients currently always returns {:ok, ...} or TMHelpers raises,
+        # this error case for get_tm_coefficients is not strictly reachable from its current form.
+        # However, it's good practice if get_tm_coefficients were to be refactored to return errors.
+
+        # {:error, reason_coeffs} ->
+        #   {:error, {:get_tm_coefficients_failed, reason_coeffs}}
     end
   end
 end
