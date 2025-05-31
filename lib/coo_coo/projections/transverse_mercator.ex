@@ -13,6 +13,8 @@ defmodule CooCoo.Projections.TransverseMercator do
   alias CooCoo.Coordinates.MapProjectionCoordinates
   alias CooCoo.Projections.TMHelpers
 
+  import CooCoo.MathHelpers, only: [equal?: 3, zero?: 2]
+
   @n_terms 6
   @max_delta_long Constants.pi_over_180() * 70.0
 
@@ -21,22 +23,45 @@ defmodule CooCoo.Projections.TransverseMercator do
   @wgs84_b_coeffs elem(@wgs84_coefficients_tuple, 1)
   @wgs84_r4oa elem(@wgs84_coefficients_tuple, 2)
 
+  @boundary_epsilon 1.0e-15
+
   # --- Helper for ArcHyperbolicTangent ---
-  def atanh(x) when is_number(x) do
+  defp atanh(x) when is_number(x) do
     cond do
-      x == 1.0 ->
-        :infinity
+      equal?(x, 1.0, @boundary_epsilon) ->
+        {:ok, :infinity}
 
-      x == -1.0 ->
-        :"-infinity"
+      equal?(x, -1.0, @boundary_epsilon) ->
+        {:ok, :"-infinity"}
 
+      # abs(x) < 1.0 is generally safe from epsilon issues for this check
       abs(x) < 1.0 ->
-        0.5 * :math.log((1.0 + x) / (1.0 - x))
+        denominator = 1.0 - x
+        # This zero? check might be redundant if the equal?(x, 1.0) above catches it.
+        if zero?(denominator, @boundary_epsilon) do
+          # This implies x is extremely close to 1.0, should be caught by the first clause.
+          # If it gets here, it's a very nuanced floating point state.
+          {:error, :division_by_zero_in_atanh_log}
+        else
+          numerator = 1.0 + x
+          # If numerator or denominator evaluate to non-positive due to x being near -1 or 1
+          # Denominator strictly < 0 if x > 1
+          if numerator <= 0.0 or denominator < 0.0 do
+            {:error, :log_domain_error_in_atanh}
+          else
+            value = numerator / denominator
+            # Check result of division for log's domain
+            if value <= 0.0 do
+              {:error, :log_domain_error_in_atanh_after_division}
+            else
+              {:ok, 0.5 * :math.log(value)}
+            end
+          end
+        end
 
+      # This means abs(x) > 1.0 (and not caught by the epsilon checks for +/- 1.0)
       true ->
-        # For abs(x) > 1.0, log input is negative, results in NaN or error.
-        # This case should ideally not be reached with valid TM inputs.
-        0.5 * :math.log((1.0 + x) / (1.0 - x))
+        {:error, :atanh_domain_error_abs_x_gt_1}
     end
   end
 
