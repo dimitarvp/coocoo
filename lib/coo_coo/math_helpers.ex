@@ -22,4 +22,15 @@ defmodule CooCoo.MathHelpers do
   def zero?(a, epsilon \\ @default_epsilon) when is_number(a) and is_number(epsilon) do
     abs(a) < epsilon
   end
+
+  @doc """
+  Checks if a value is a finite float (not NaN or +/- infinity).
+  """
+  def finite_float?(value) do
+    # NaN is the only float not equal to itself
+    is_float(value) and
+      value != :infinity and
+      value != :"-infinity" and
+      value == value
+  end
 end
