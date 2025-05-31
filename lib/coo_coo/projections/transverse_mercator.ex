@@ -26,7 +26,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   @boundary_epsilon 1.0e-15
 
   # --- Helper for ArcHyperbolicTangent ---
-  defp atanh(x) when is_number(x) do
+  def atanh(x) when is_number(x) do
     cond do
       equal?(x, 1.0, @boundary_epsilon) ->
         {:ok, :infinity}
