@@ -25,6 +25,8 @@ defmodule CooCoo.Projections.TransverseMercator do
 
   @boundary_epsilon 1.0e-15
 
+  def n_terms(), do: @n_terms
+
   # --- Helper for ArcHyperbolicTangent ---
   def atanh(x) when is_number(x) do
     cond do

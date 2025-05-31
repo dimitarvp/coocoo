@@ -5,6 +5,8 @@ defmodule CooCoo.Projections.TMHelpers do
   # Consistent with CooCoo.Projections.TransverseMercator
   @n_terms 6
 
+  def n_terms(), do: @n_terms
+
   def generate_coefficients(flattening) do
     inv_f = 1.0 / flattening
     n1 = 1.0 / (2.0 * inv_f - 1.0)
