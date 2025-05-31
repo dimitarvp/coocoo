@@ -9,7 +9,7 @@ defmodule CooCoo.Projections.PolarStereographic do
   alias CooCoo.Coordinates.GeodeticCoordinates
   alias CooCoo.Coordinates.MapProjectionCoordinates
 
-  defp polar_pow(eccentricity, sin_latitude) do
+  def polar_pow(eccentricity, sin_latitude) do
     es_sin = eccentricity * sin_latitude
     denominator = 1.0 + es_sin
 

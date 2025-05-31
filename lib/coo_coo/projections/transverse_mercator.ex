@@ -22,7 +22,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   @wgs84_r4oa elem(@wgs84_coefficients_tuple, 2)
 
   # --- Helper for ArcHyperbolicTangent ---
-  defp atanh(x) when is_number(x) do
+  def atanh(x) when is_number(x) do
     cond do
       x == 1.0 ->
         :infinity
@@ -41,7 +41,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   end
 
   # --- Helper to compute geodetic latitude from conformal latitude ---
-  defp geodetic_latitude_from_conformal(sin_chi, eccentricity) do
+  def geodetic_latitude_from_conformal(sin_chi, eccentricity) do
     s_initial = sin_chi
 
     final_s =
@@ -102,7 +102,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   end
 
   # --- Helper to compute hyperbolic series terms ---
-  defp compute_hyperbolic_series(two_x, num_terms) do
+  def compute_hyperbolic_series(two_x, num_terms) do
     c2kx0 = :math.cosh(two_x)
     s2kx0 = :math.sinh(two_x)
 
@@ -120,7 +120,7 @@ defmodule CooCoo.Projections.TransverseMercator do
   end
 
   # --- Helper to compute trigonometric series terms ---
-  defp compute_trig_series(two_y, num_terms) do
+  def compute_trig_series(two_y, num_terms) do
     c2ky0 = :math.cos(two_y)
     s2ky0 = :math.sin(two_y)
 
