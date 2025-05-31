@@ -88,7 +88,7 @@ defmodule CooCoo.Projections.PolarStereographic do
 
       sin_lat_eff = :math.sin(latitude_eff)
       # essin is used in polar_pow
-      # essin = es * sin_lat_eff 
+      # essin = es * sin_lat_eff
       pow_es_val = polar_pow(es, sin_lat_eff)
       t = :math.tan(Constants.pi_over_4() - latitude_eff / 2.0) / pow_es_val
 
