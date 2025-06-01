@@ -148,6 +148,36 @@ defmodule CooCoo.CoreHelpersTest do
   end
 
   describe "CooCoo.Projections.TMHelpers.generate_coefficients/1" do
+    test "calculate_beta_1/8 generates correct value for WGS84 n" do
+      f_wgs84 = Constants.wgs84_f()
+      inv_f_wgs84 = 1.0 / f_wgs84
+      n1 = 1.0 / (2.0 * inv_f_wgs84 - 1.0)
+      n2 = n1 * n1
+      n3 = n2 * n1
+      n4 = n3 * n1
+      n5 = n4 * n1
+      n6 = n5 * n1
+      n7 = n6 * n1
+      n8 = n7 * n1
+
+      # This is the formula for beta_1 from TMHelpers.calculate_beta_1
+      # beta_1 = 0.5*n1 - (2/3)*n2 + (37/96)*n3 - (1/360)*n4 - (81/512)*n5 + (96199/604800)*n6 - (5406467/38707200)*n7 + (7944359/67737600)*n8
+      # The expected value from the C++ hardcoded "WE" coefficients for the first beta term (bCoeff[0])
+      # which corresponds to our beta_1 in the series.
+      expected_beta1_wgs84 = -8.3773216405794867707e-04
+
+      # Note: TMHelpers.calculate_beta_1 is not exported by default from TMHelpers if it's defp.
+      # You confirmed you made them public (def).
+      actual_beta1 = TMHelpers.calculate_beta_1(n1, n2, n3, n4, n5, n6, n7, n8)
+
+      assert_floats_close(
+        actual_beta1,
+        expected_beta1_wgs84,
+        # Using a very small delta for this direct formula check
+        @high_precision_delta
+      )
+    end
+
     test "generates WGS84 coefficients correctly" do
       # Access @n_terms from the module where it's defined for this context
       n_terms = CooCoo.Projections.TMHelpers.n_terms()
@@ -170,8 +200,7 @@ defmodule CooCoo.CoreHelpersTest do
       assert_floats_close(
         elem(b_coeffs, 0),
         expected_b1_wgs84,
-        @high_precision_delta,
-        "TM beta1 coeff for WGS84"
+        @high_precision_delta
       )
 
       assert_floats_close(r4oa, expected_r4oa_wgs84, @high_precision_delta, "TM R4/a for WGS84")
