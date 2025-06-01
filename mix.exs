@@ -21,6 +21,7 @@ defmodule CooCoo.MixProject do
 
   defp deps do
     [
+      {:decimal, "~> 2.3"},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false}
     ]
   end
