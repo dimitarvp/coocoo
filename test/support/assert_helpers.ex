@@ -17,7 +17,6 @@ defmodule CooCoo.Test.AssertHelpers do
   Includes a custom message.
   """
   def assert_floats_close(actual, expected, delta \\ @default_float_delta, message \\ nil) do
-    message = message || "Expected #{expected} to be close to #{actual} (delta: #{delta})"
     assert_in_delta actual, expected, delta, message
   end
 
