@@ -32,41 +32,34 @@ defmodule CooCoo.Projections.TransverseMercator do
 
   # --- Helper for ArcHyperbolicTangent ---
   def atanh(x) when is_number(x) do
+    # Pre-check based on domain of atanh: (-1, 1) for finite real results
+    # Values exactly at +/- 1.0 result in +/- infinity. Values > 1 or < -1 result in NaN.
     cond do
+      # x is effectively 1.0
       equal?(x, 1.0, @boundary_epsilon) ->
         {:ok, :infinity}
 
+      # x is effectively -1.0
       equal?(x, -1.0, @boundary_epsilon) ->
         {:ok, :"-infinity"}
 
-      # abs(x) < 1.0 is generally safe from epsilon issues for this check
-      abs(x) < 1.0 ->
-        denominator = 1.0 - x
-        # This zero? check might be redundant if the equal?(x, 1.0) above catches it.
-        if zero?(denominator, @boundary_epsilon) do
-          # This implies x is extremely close to 1.0, should be caught by the first clause.
-          # If it gets here, it's a very nuanced floating point state.
-          {:error, :division_by_zero_in_atanh_log}
-        else
-          numerator = 1.0 + x
-          # If numerator or denominator evaluate to non-positive due to x being near -1 or 1
-          # Denominator strictly < 0 if x > 1
-          if numerator <= 0.0 or denominator < 0.0 do
-            {:error, :log_domain_error_in_atanh}
-          else
-            value = numerator / denominator
-            # Check result of division for log's domain
-            if value <= 0.0 do
-              {:error, :log_domain_error_in_atanh_after_division}
-            else
-              {:ok, 0.5 * :math.log(value)}
-            end
-          end
-        end
-
-      # This means abs(x) > 1.0 (and not caught by the epsilon checks for +/- 1.0)
-      true ->
+      # Clearly outside domain for real atanh
+      abs(x) > 1.0 ->
         {:error, :atanh_domain_error_abs_x_gt_1}
+
+      # abs(x) < 1.0 (strictly, due to previous checks with epsilon)
+      true ->
+        result = :math.atanh(x)
+        # :math.atanh should return a float for inputs strictly between -1 and 1.
+        # Check if it's finite, just in case of unexpected behavior for edge floats.
+        if finite_float?(result) do
+          {:ok, result}
+        else
+          # This case would be unusual if abs(x) < 1.0 was truly met.
+          # Could happen if x was already NaN or an infinity was passed somehow
+          # despite the outer `when is_number(x)`.
+          {:error, {:atanh_returned_non_finite, result}}
+        end
     end
   end
 
