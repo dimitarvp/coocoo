@@ -203,7 +203,7 @@ defmodule CooCoo.CoreHelpersTest do
         @high_precision_delta
       )
 
-      assert_floats_close(r4oa, expected_r4oa_wgs84, @high_precision_delta, "TM R4/a for WGS84")
+      assert_floats_close(r4oa, expected_r4oa_wgs84, @high_precision_delta)
     end
   end
 
