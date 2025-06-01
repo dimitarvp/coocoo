@@ -70,6 +70,51 @@ defmodule CooCoo.Projections.TransverseMercator do
     end
   end
 
+  @doc """
+  Calculates a single iteration step for `next_s` in the conformal to geodetic latitude conversion.
+  Returns `{:ok, next_s_value}` or `{:error, reason}`.
+  """
+  def calculate_tm_iteration_next_s(current_s, sin_chi, eccentricity) do
+    val_for_atanh = eccentricity * current_s
+
+    p_arg =
+      cond do
+        val_for_atanh >= 1.0 -> 1.0 - @boundary_epsilon
+        val_for_atanh <= -1.0 -> -1.0 + @boundary_epsilon
+        true -> val_for_atanh
+      end
+
+    with {:ok, atanh_val_p_arg} <- atanh(p_arg),
+         true <-
+           is_number(atanh_val_p_arg) or
+             {:error, {:atanh_returned_non_numeric_for_p_exp_single_step, atanh_val_p_arg}},
+         {:ok, p_exp_arg} <- {:ok, eccentricity * atanh_val_p_arg},
+         {:ok, p_val} <-
+           {:ok,
+            cond do
+              p_exp_arg > 709.0 -> 1.0e300
+              p_exp_arg < -709.0 -> 1.0e-300
+              true -> :math.exp(p_exp_arg)
+            end} do
+      # p_val is a finite float here (or a very large/small capped one)
+      p_sq = p_val * p_val
+      one_plus_sin_chi = 1.0 + sin_chi
+      one_minus_sin_chi = 1.0 - sin_chi
+      denominator = one_plus_sin_chi * p_sq + one_minus_sin_chi
+
+      if zero?(denominator, @boundary_epsilon) do
+        {:error, :zero_denominator_in_next_s_calculation}
+      else
+        next_s_val_calc = (one_plus_sin_chi * p_sq - one_minus_sin_chi) / denominator
+        # The finite_float? check will be done by the caller (do_geodetic_lat_iteration)
+        {:ok, next_s_val_calc}
+      end
+    else
+      # This else matches any error from the `with` chain (e.g., from atanh)
+      {:error, reason} -> {:error, {:calculate_next_s_failed_in_with, reason}}
+    end
+  end
+
   # --- Helper to compute geodetic latitude from conformal latitude ---
   def geodetic_latitude_from_conformal(sin_chi, eccentricity) do
     s_initial = sin_chi
@@ -89,45 +134,15 @@ defmodule CooCoo.Projections.TransverseMercator do
   end
 
   def do_geodetic_lat_iteration(sin_chi, eccentricity, current_s, s_old, iterations_left) do
-    # Use a specific, small epsilon for convergence check of the iteration itself
     iteration_epsilon = 1.0e-12
-    # Using helper
+
     if equal?(current_s, s_old, iteration_epsilon) do
+      # Converged
       {:ok, current_s}
     else
-      val_for_atanh = eccentricity * current_s
-
-      p_arg =
-        cond do
-          val_for_atanh >= 1.0 -> 1.0 - @boundary_epsilon
-          val_for_atanh <= -1.0 -> -1.0 + @boundary_epsilon
-          true -> val_for_atanh
-        end
-
-      with {:ok, atanh_val_p_arg} <- atanh(p_arg),
-           true <-
-             is_number(atanh_val_p_arg) or
-               {:error, {:atanh_returned_non_numeric_for_p_exp_iteration, atanh_val_p_arg}},
-           {:ok, p_exp_arg} <- {:ok, eccentricity * atanh_val_p_arg},
-           {:ok, p_val} <-
-             {:ok,
-              cond do
-                p_exp_arg > 709.0 -> 1.0e300
-                p_exp_arg < -709.0 -> 1.0e-300
-                true -> :math.exp(p_exp_arg)
-              end} do
-        # p_val is now a number
-        p_sq = p_val * p_val
-        one_plus_sin_chi = 1.0 + sin_chi
-        one_minus_sin_chi = 1.0 - sin_chi
-        denominator = one_plus_sin_chi * p_sq + one_minus_sin_chi
-
-        # Using helper
-        if zero?(denominator, @boundary_epsilon) do
-          {:error, :zero_denominator_in_geodetic_lat_iteration}
-        else
-          next_s_val_calc = (one_plus_sin_chi * p_sq - one_minus_sin_chi) / denominator
-
+      # Call the new helper for the single iteration step
+      case calculate_tm_iteration_next_s(current_s, sin_chi, eccentricity) do
+        {:ok, next_s_val_calc} ->
           if finite_float?(next_s_val_calc) do
             do_geodetic_lat_iteration(
               sin_chi,
@@ -139,9 +154,10 @@ defmodule CooCoo.Projections.TransverseMercator do
           else
             {:error, {:invalid_next_s_in_iteration, next_s_val_calc}}
           end
-        end
-      else
-        {:error, reason} -> {:error, {:iteration_step_failed_in_with, reason}}
+
+        # Propagate error from calculate_tm_iteration_next_s
+        {:error, reason_from_calc} ->
+          {:error, {:iteration_step_calculation_failed, reason_from_calc}}
       end
     end
   end
